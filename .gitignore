@@ -1,0 +1,10 @@
+.env
+notebooks
+__pycache__
+*.pyc
+.vscode
+*.ipynb_checkpoints
+/experiments/exp001_tiny_overfit/checkpoints/
+/experiments/exp002_full_training/checkpoints/
+data/
+/experiments/

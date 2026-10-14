@@ -1,0 +1,7 @@
+torch>=2.5
+lightning>=2.4
+transformers>=4.45
+datasets>=3.0
+
+[dev]
+pytest>=8
