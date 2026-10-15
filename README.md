@@ -237,6 +237,23 @@ trainer.test(model, datamodule=data)
 
 ### Full-data EXP-002
 
+**Architecture** (`src/models/affinity.py`): a single encoder pass feeds two
+linear projections; their scaled dot product gives chunk-to-context logits.
+
+```mermaid
+flowchart TD
+    IN["[CLS] context tokens [SEP] chunk tokens [SEP]"] --> ENC["Transformer encoder (backbone, one pass)"]
+    ENC --> DROP["Dropout"]
+    DROP --> Q["Query projection<br/>Linear(hidden → projection_dim)"]
+    DROP --> K["Key projection<br/>Linear(hidden → projection_dim)"]
+    Q --> DOT["Q · Kᵀ / √projection_dim"]
+    K --> DOT
+    DOT --> LOG["Raw logits [B, T, T]<br/>row = chunk token, column = context token"]
+    MASKS["context_mask, chunk_mask, attention_mask"] --> PM["pair_mask [B, T, T]<br/>chunk × context, no special/padding tokens"]
+    LOG --> LOSS["Marginal loss over all gold antecedent tokens<br/>(invalid pairs masked)"]
+    PM --> LOSS
+```
+
 Run the reproducible full-training experiment from the repository root:
 
 ```bash
@@ -251,6 +268,16 @@ Configuration, metrics, and relation-level predictions are written to
 `checkpoints/` subdirectory and should not be committed.
 
 ### EXP-003 behavioral evaluation
+
+**Architecture**: no new layers; the frozen EXP-002 affinity model is evaluated only.
+
+```mermaid
+flowchart LR
+    CK["Frozen EXP-002 checkpoint<br/>(encoder + query/key projections)"] --> LOG["Chunk→context logits [B, T, T]"]
+    LOG --> ARG["Argmax over context tokens<br/>for each anaphor token"]
+    ARG --> HIT["Hit@1 per category / subtest"]
+    NEG["Negative controls<br/>(need anaphor detector / NULL)"] --> UNS["Reported as unsupported"]
+```
 
 Evaluate the frozen EXP-002 checkpoint on the reserved behavioral test split:
 
@@ -267,6 +294,37 @@ anaphor detector or null-antecedent prediction are reported as unsupported,
 not as correct predictions.
 
 ### EXP-004 antecedent span extraction
+
+**Architecture** (`src/models/span_extraction.py`): all approaches share one encoder pass and score every candidate context span (up to `max_span_length`) for a given anaphor; the anaphor is the mean of its token states.
+
+```mermaid
+flowchart TD
+    IN["Context + chunk tokens"] --> ENC["Transformer encoder (shared pass)"]
+    ENC --> DROP["Dropout"]
+    DROP --> ANA["Anaphor repr = mean of anaphor token states"]
+    DROP --> CAND["Enumerate candidate context spans [start, end)"]
+    ANA --> B0
+    ANA --> S0
+    subgraph BOUNDARY["Boundary head"]
+        B0["Context / anaphor projections"] --> B1["concat(ctx, anaphor, ctx × anaphor)"]
+        B1 --> B2["Linear + tanh"]
+        B2 --> B3["Start scorer (GELU, Linear→1)"]
+        B2 --> B4["End scorer (GELU, Linear→1)"]
+        B3 --> B5["score = start[s] + end[e-1]"]
+        B4 --> B5
+    end
+    subgraph SPANPAIR["Span-pair head"]
+        S0["Start / end / mean projections"] --> S1["span repr = start[s] + end[e-1] + mean(s:e)"]
+        S1 --> S2["Anaphor query projection"]
+        S2 --> S3["score = span · query / √d + Linear(span)"]
+    end
+    CAND --> B5
+    CAND --> S1
+    B5 --> LOSS["Marginal likelihood over alternative gold spans (softmax across candidates)"]
+    S3 --> LOSS
+```
+
+The baseline (frozen EXP-002 affinity token, optionally expanded to a spaCy noun chunk) adds no learned layers.
 
 Compare frozen EXP-002 affinity expansion with independently trained boundary
 and span-pair heads using the development split only:
@@ -288,6 +346,28 @@ qualitative analysis as complete. Checkpoints are not intended for Git.
 
 ### EXP-005 null antecedent prediction
 
+**Architecture** (`src/models/null_antecedent.py`): the EXP-004 span-pair model is frozen and a NULL candidate score is appended to its candidate scores before the softmax.
+
+```mermaid
+flowchart TD
+    SPAN["Frozen EXP-004 span-pair model<br/>(encoder + span head)"] --> CS["Candidate span scores [N]"]
+    SPAN --> AR["anaphor_repr"]
+    SPAN --> CR["context_repr (mean of context tokens)"]
+    subgraph NULLVAR["NULL score variants"]
+        C["constant: fixed 0"]
+        LB["learned_bias: one scalar parameter"]
+        CD["conditioned: concat(anaphor, context, anaphor × context)<br/>→ Linear(3H→128) → GELU → Dropout → Linear(128→1)"]
+    end
+    AR --> CD
+    CR --> CD
+    CS --> CAT["Concatenate [candidate scores, NULL score]"]
+    C --> CAT
+    LB --> CAT
+    CD --> CAT
+    CAT --> SM["Softmax → probabilities; NULL predicted if argmax is last index"]
+    SM --> LOSS["Marginal link/NULL loss"]
+```
+
 Compare fixed, globally learned, and context-conditioned NULL candidates using
 the frozen EXP-004 span-pair checkpoint:
 
@@ -305,6 +385,15 @@ paired-contrast results, predictions, and failure diagnostics are written under
 `experiments/exp005_null_antecedent/`. Checkpoints are not intended for Git.
 
 ### EXP-005B NULL prediction validation
+
+**Architecture**: no new layers; the frozen context-conditioned EXP-005 model is only evaluated.
+
+```mermaid
+flowchart LR
+    M["Frozen EXP-005 conditioned model<br/>(span-pair head + NULL MLP head)"] --> S["NULL score vs best span score"]
+    S --> T["Threshold on NULL margin<br/>(calibrated on source-disjoint subset, compared with 0 on held-out)"]
+    S --> R["50-example human-review CSV + false-NULL analysis"]
+```
 
 Validate the frozen context-conditioned EXP-005 model without retraining:
 

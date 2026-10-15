@@ -1,5 +1,22 @@
 ## EXP-001 — Tiny-Set Overfitting
 
+**Architecture** (`src/models/affinity.py`): a single encoder pass feeds two
+linear projections; their scaled dot product gives chunk-to-context logits.
+
+```mermaid
+flowchart TD
+    IN["[CLS] context tokens [SEP] chunk tokens [SEP]"] --> ENC["Transformer encoder (backbone, one pass)"]
+    ENC --> DROP["Dropout"]
+    DROP --> Q["Query projection<br/>Linear(hidden → projection_dim)"]
+    DROP --> K["Key projection<br/>Linear(hidden → projection_dim)"]
+    Q --> DOT["Q · Kᵀ / √projection_dim"]
+    K --> DOT
+    DOT --> LOG["Raw logits [B, T, T]<br/>row = chunk token, column = context token"]
+    MASKS["context_mask, chunk_mask, attention_mask"] --> PM["pair_mask [B, T, T]<br/>chunk × context, no special/padding tokens"]
+    LOG --> LOSS["Marginal loss over all gold antecedent tokens<br/>(invalid pairs masked)"]
+    PM --> LOSS
+```
+
 **Description:** Tested whether the encoder affinity model can memorize 16 deterministically sampled, token-aligned training examples using gold anaphor spans. The same examples were used for validation and a final deterministic evaluation of the best training-loss checkpoint.
 
 **Hypothesis:** The model can memorize 16 annotated examples and achieve near-perfect antecedent localization.
@@ -24,6 +41,23 @@
 **Conclusion:** The tiny-set overfitting sanity check passed. The model memorized the selected examples and met all measured success targets.
 
 ## EXP-002 — Full-Dataset Training and Baseline Evaluation
+
+**Architecture** (`src/models/affinity.py`): a single encoder pass feeds two
+linear projections; their scaled dot product gives chunk-to-context logits.
+
+```mermaid
+flowchart TD
+    IN["[CLS] context tokens [SEP] chunk tokens [SEP]"] --> ENC["Transformer encoder (backbone, one pass)"]
+    ENC --> DROP["Dropout"]
+    DROP --> Q["Query projection<br/>Linear(hidden → projection_dim)"]
+    DROP --> K["Key projection<br/>Linear(hidden → projection_dim)"]
+    Q --> DOT["Q · Kᵀ / √projection_dim"]
+    K --> DOT
+    DOT --> LOG["Raw logits [B, T, T]<br/>row = chunk token, column = context token"]
+    MASKS["context_mask, chunk_mask, attention_mask"] --> PM["pair_mask [B, T, T]<br/>chunk × context, no special/padding tokens"]
+    LOG --> LOSS["Marginal loss over all gold antecedent tokens<br/>(invalid pairs masked)"]
+    PM --> LOSS
+```
 
 **Description:** Trained the existing DistilBERT token-affinity model on the full preprocessed training split and selected a checkpoint using development loss. Evaluated the selected checkpoint on the independent development split and compared it with exact random-token and last-context-token baselines; the test split was reserved for EXP-003.
 
@@ -62,6 +96,16 @@ Best development-loss checkpoint: epoch 2; 7 epochs completed. The selected mode
 
 ## EXP-003 — Behavioral Test Evaluation
 
+**Architecture**: no new layers; the frozen EXP-002 affinity model is evaluated only.
+
+```mermaid
+flowchart LR
+    CK["Frozen EXP-002 checkpoint<br/>(encoder + query/key projections)"] --> LOG["Chunk→context logits [B, T, T]"]
+    LOG --> ARG["Argmax over context tokens<br/>for each anaphor token"]
+    ARG --> HIT["Hit@1 per category / subtest"]
+    NEG["Negative controls<br/>(need anaphor detector / NULL)"] --> UNS["Reported as unsupported"]
+```
+
 **Description:** Evaluated the frozen EXP-002 best-development-loss checkpoint on the reserved 36-example behavioral test split. No training, fine-tuning, or model selection was performed.
 
 **Configuration:** Dataset `mhaugestad/contextualise-context` (revision unspecified; test fingerprint `0996008708007a45`); DistilBERT base uncased, projection dimension 128, dropout 0.1, max length 512, evaluation seed 42, batch size 16, MPS inference. The checkpoint was `experiments/exp002_full_training/checkpoints/best.ckpt`, selected at epoch 2 by minimum `val/loss` 1.054341; SHA-256 `e91a9b2f0e4dbb30d94d8bf2af9af157d5f3e26ec7fd1d380ed1198192b1cf90`. The EXP-002 base/current Git commit was `9a19af658ac447856b398cd3c10aa4551dfc243b` (working tree dirty). The evaluation retains the EXP-002 model, tokenizer, masking, aggregation, and Hit@1 definitions.
@@ -91,6 +135,37 @@ The test result is descriptive, not a direct comparison of generalization: the s
 
 
 ## EXP-004 — Antecedent Span Extraction
+
+**Architecture** (`src/models/span_extraction.py`): all approaches share one encoder pass and score every candidate context span (up to `max_span_length`) for a given anaphor; the anaphor is the mean of its token states.
+
+```mermaid
+flowchart TD
+    IN["Context + chunk tokens"] --> ENC["Transformer encoder (shared pass)"]
+    ENC --> DROP["Dropout"]
+    DROP --> ANA["Anaphor repr = mean of anaphor token states"]
+    DROP --> CAND["Enumerate candidate context spans [start, end)"]
+    ANA --> B0
+    ANA --> S0
+    subgraph BOUNDARY["Boundary head"]
+        B0["Context / anaphor projections"] --> B1["concat(ctx, anaphor, ctx × anaphor)"]
+        B1 --> B2["Linear + tanh"]
+        B2 --> B3["Start scorer (GELU, Linear→1)"]
+        B2 --> B4["End scorer (GELU, Linear→1)"]
+        B3 --> B5["score = start[s] + end[e-1]"]
+        B4 --> B5
+    end
+    subgraph SPANPAIR["Span-pair head"]
+        S0["Start / end / mean projections"] --> S1["span repr = start[s] + end[e-1] + mean(s:e)"]
+        S1 --> S2["Anaphor query projection"]
+        S2 --> S3["score = span · query / √d + Linear(span)"]
+    end
+    CAND --> B5
+    CAND --> S1
+    B5 --> LOSS["Marginal likelihood over alternative gold spans (softmax across candidates)"]
+    S3 --> LOSS
+```
+
+The baseline (frozen EXP-002 affinity token, optionally expanded to a spaCy noun chunk) adds no learned layers.
 
 **Description:** Compared deterministic span expansion of the frozen EXP-002 affinity checkpoint with an anaphor-conditioned start/end boundary head and direct span-pair scorer. All approaches use the gold anaphor spans and the same filtered, token-aligned development relations; the reserved EXP-003 test split is not loaded.
 
@@ -209,6 +284,28 @@ Paired comparisons and percentile bootstrap intervals are in `comparison_metrics
 
 # EXP-005 — Null Antecedent Prediction
 
+**Architecture** (`src/models/null_antecedent.py`): the EXP-004 span-pair model is frozen and a NULL candidate score is appended to its candidate scores before the softmax.
+
+```mermaid
+flowchart TD
+    SPAN["Frozen EXP-004 span-pair model<br/>(encoder + span head)"] --> CS["Candidate span scores [N]"]
+    SPAN --> AR["anaphor_repr"]
+    SPAN --> CR["context_repr (mean of context tokens)"]
+    subgraph NULLVAR["NULL score variants"]
+        C["constant: fixed 0"]
+        LB["learned_bias: one scalar parameter"]
+        CD["conditioned: concat(anaphor, context, anaphor × context)<br/>→ Linear(3H→128) → GELU → Dropout → Linear(128→1)"]
+    end
+    AR --> CD
+    CR --> CD
+    CS --> CAT["Concatenate [candidate scores, NULL score]"]
+    C --> CAT
+    LB --> CAT
+    CD --> CAT
+    CAT --> SM["Softmax → probabilities; NULL predicted if argmax is last index"]
+    SM --> LOSS["Marginal link/NULL loss"]
+```
+
 **Description:** Extended the frozen EXP-004 span-pair scorer with a fixed NULL candidate, a learned global NULL bias, and a context-conditioned NULL head. Gold anaphor spans remain supplied; automatic anaphor detection is out of scope.
 
 **Hypotheses:**
@@ -261,6 +358,15 @@ Forced-LINK Span EM measures span selection with NULL ignored. Actual positive T
 **Next steps:** Retain the conditioned NULL head as the leading architecture for follow-up, but first manually review the synthetic audit subset and inspect the saved False-NULL examples; then evaluate on human-reviewed negatives before considering anaphor detection.
 
 # EXP-005B — NULL Prediction Validation
+
+**Architecture**: no new layers; the frozen context-conditioned EXP-005 model is only evaluated.
+
+```mermaid
+flowchart LR
+    M["Frozen EXP-005 conditioned model<br/>(span-pair head + NULL MLP head)"] --> S["NULL score vs best span score"]
+    S --> T["Threshold on NULL margin<br/>(calibrated on source-disjoint subset, compared with 0 on held-out)"]
+    S --> R["50-example human-review CSV + false-NULL analysis"]
+```
 
 Generated: 2026-10-14T17:04:04.865933+00:00
 
