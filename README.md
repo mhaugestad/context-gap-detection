@@ -265,3 +265,58 @@ predictions, failure analysis, and a human-readable report to
 `experiments/exp003_behavioral_eval/`. Negative controls that require an
 anaphor detector or null-antecedent prediction are reported as unsupported,
 not as correct predictions.
+
+### EXP-004 antecedent span extraction
+
+Compare frozen EXP-002 affinity expansion with independently trained boundary
+and span-pair heads using the development split only:
+
+```bash
+python scripts/experiments/exp004_span_extraction.py --approach all --offline
+```
+
+Run one approach independently with `--approach baseline`, `boundary`, or
+`span_pair`. The baseline expands to a containing noun chunk only when a local
+spaCy `en_core_web_sm` model is installed; otherwise it returns the selected
+affinity token and records that fallback. Learned models share one encoder
+pass per batch and use marginal likelihood over alternative gold spans.
+Predictions, metrics, checkpoints, and comparison reports are written to
+`experiments/exp004_span_extraction/`. The runner preprocesses train/dev only;
+it never uses the EXP-003 test split. Review `error_review.json` manually for
+each learned approach and record error classifications before treating the
+qualitative analysis as complete. Checkpoints are not intended for Git.
+
+### EXP-005 null antecedent prediction
+
+Compare fixed, globally learned, and context-conditioned NULL candidates using
+the frozen EXP-004 span-pair checkpoint:
+
+```bash
+python scripts/experiments/exp005_null_antecedent.py --approach all --offline
+```
+
+Run one variant with `--approach constant`, `learned_bias`, or `conditioned`.
+The runner requests only the train and dev dataset splits. Synthetic negatives
+are created within each source split; examples with no valid relation are
+audited but never promoted to NULL targets. Review the `manual_review_set`
+entries in `experiments/exp005_null_antecedent/negative_generation_report.json`:
+synthetic NULL labels remain heuristic until reviewed. Metrics, calibration,
+paired-contrast results, predictions, and failure diagnostics are written under
+`experiments/exp005_null_antecedent/`. Checkpoints are not intended for Git.
+
+### EXP-005B NULL prediction validation
+
+Validate the frozen context-conditioned EXP-005 model without retraining:
+
+```bash
+python scripts/experiments/exp005b_null_validation.py --offline
+```
+
+This evaluation requests only the development split and writes the 50-example
+human-review CSV, false-NULL analysis, source-grouped threshold calibration,
+predictions, and comparison report under
+`experiments/exp005b_null_validation/`. Human labels are intentionally left
+blank and marked `PENDING`; the error-enriched sample must not be treated as
+representative. Calibration selects a threshold on one source-disjoint subset
+and compares it with threshold zero on the held-out subset. The EXP-005B
+methodology and outcomes are appended to `EXPERIMENTLOG.md`.
